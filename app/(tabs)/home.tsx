@@ -1,7 +1,9 @@
 import { useSettings } from '@/context/settingsContext';
 import useEspConnection from '@/hooks/useEspConnection';
 import { useScale } from '@/hooks/useScale';
+import useVoiceControl from '@/hooks/useVoiceControl';
 import espCommandService from '@/services/espCommandService';
+import { VoiceCommand } from '@/services/voiceCommandService';
 import { LinearGradient } from 'expo-linear-gradient';
 import { onValue, ref } from 'firebase/database';
 import { FC, useEffect, useRef, useState } from 'react';
@@ -18,6 +20,8 @@ import {
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import DeviceCard from '../../components/DeviceCard';
 import PageHeader from '../../components/PageHeader';
+import VoiceCommandsList from '../../components/VoiceCommandsList';
+import VoiceControlModal from '../../components/VoiceControlModal';
 import { database } from '../../services/firebase';
 
 const BLUE_PRIMARY = '#008080';
@@ -31,10 +35,16 @@ const Dashboard: FC = () => {
     const [toastMsg, setToastMsg] = useState('');
     const fadeAnim = useRef(new Animated.Value(0)).current;
 
+    // Voice Control State
+    const [voiceModalVisible, setVoiceModalVisible] = useState(false);
+    const [voiceCommandsListVisible, setVoiceCommandsListVisible] = useState(false);
+    const openaiApiKey = process.env.EXPO_PUBLIC_OPENAI_API_KEY || '';
+    
     // Hooks
     const { addHistoryItem } = useSettings();
     const { sText, sIcon } = useScale();
     const espConnection = useEspConnection(true);
+    const voiceControl = useVoiceControl(openaiApiKey);
 
     useEffect(() => {
         const dbRef = ref(database, 'vista_iot');
@@ -216,6 +226,70 @@ const Dashboard: FC = () => {
         }
     };
 
+    /**
+     * Handle voice command execution
+     */
+    const handleVoiceCommand = async (command: VoiceCommand) => {
+        try {
+            setLoadingDevice('voice');
+            
+            // Send command to ESP32
+            const response = await espCommandService.sendCommand(command.action);
+            
+            if (response.success) {
+                // Speak confirmation
+                const confirmMsg = voiceControl.voiceState.language === 'ur' 
+                    ? 'ٹھیک ہے، یہ کر رہے ہیں'
+                    : 'Okay, doing this';
+                    
+                await voiceControl.speakConfirmation(confirmMsg);
+                
+                // Log to history
+                addHistoryItem(
+                    command.name, 
+                    'Voice Control', 
+                    'mic'
+                );
+                
+                triggerToast(`${command.name}`);
+                
+                // Update device states from response
+                setDevices(prevDevices =>
+                    prevDevices.map(d => {
+                        const updated = { ...d };
+                        
+                        if (response.device_states) {
+                            if (d.id === 'bulb1') updated.value = response.device_states.bulb1;
+                            if (d.id === 'bulb2') updated.value = response.device_states.bulb2;
+                            if (d.id === 'fan1_speed') updated.value = response.device_states.fan1_speed;
+                            if (d.id === 'fan2_speed') updated.value = response.device_states.fan2_speed;
+                            if (d.id === 'angle') updated.value = response.device_states.servo_angle;
+                        }
+                        return updated;
+                    })
+                );
+            } else {
+                const errorMsg = voiceControl.voiceState.language === 'ur'
+                    ? 'کمان ناکام'
+                    : 'Command failed';
+                await voiceControl.speakConfirmation(errorMsg);
+                triggerToast("Command failed: " + response.message);
+            }
+        } catch (error) {
+            triggerToast("Voice execution error");
+            console.error('Voice command error:', error);
+        } finally {
+            setLoadingDevice(null);
+        }
+    };
+
+    /**
+     * Initialize voice control on mount
+     */
+    useEffect(() => {
+        voiceControl.initializeAudio();
+    }, []);
+
     const onlineCount = devices.filter(d => d.status === 'online').length;
 
     if (loading) {
@@ -230,11 +304,19 @@ const Dashboard: FC = () => {
         <View style={styles.container}>
             <StatusBar barStyle="light-content" backgroundColor={BLUE_PRIMARY} translucent={true} />
             
-            <PageHeader 
-                icon={<Ionicons name="home" size={sIcon(30)} color="#fff" />}
-                title="VISTA" 
-                subtitle="Smart Home Dashboard" 
-            />
+            <View style={styles.headerContainer}>
+                <PageHeader 
+                    icon={<Ionicons name="home" size={sIcon(30)} color="#fff" />}
+                    title="VISTA" 
+                    subtitle="Smart Home Dashboard" 
+                />
+                <TouchableOpacity 
+                    style={styles.voiceButton}
+                    onPress={() => setVoiceModalVisible(true)}
+                >
+                    <Ionicons name="mic" size={sIcon(24)} color="#fff" />
+                </TouchableOpacity>
+            </View>
 
             <ScrollView contentContainerStyle={styles.contentContainer} showsVerticalScrollIndicator={false}>
                 <View style={styles.contentWrapper}>
@@ -336,12 +418,45 @@ const Dashboard: FC = () => {
                     </View>
                 </Animated.View>
             )}
+
+            {/* Voice Control Modal */}
+            <VoiceControlModal
+                visible={voiceModalVisible}
+                voiceState={voiceControl.voiceState}
+                onClose={() => {
+                    voiceControl.cancelRecording();
+                    setVoiceModalVisible(false);
+                    voiceControl.resetState();
+                }}
+                onLanguageChange={voiceControl.setLanguage}
+                onStartRecording={voiceControl.startRecording}
+                onStopRecording={voiceControl.stopRecording}
+                onCancelRecording={voiceControl.cancelRecording}
+                onConfirmCommand={handleVoiceCommand}
+                onShowCommands={() => setVoiceCommandsListVisible(true)}
+                availableCommands={voiceControl.getAvailableCommands()}
+            />
+
+            {/* Voice Commands List Modal */}
+            <VoiceCommandsList
+                visible={voiceCommandsListVisible}
+                commands={voiceControl.getAvailableCommands()}
+                language={voiceControl.voiceState.language}
+                onClose={() => setVoiceCommandsListVisible(false)}
+            />
         </View>
     );
 }
 
 const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: '#fff' },
+    headerContainer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+    voiceButton: {
+        paddingRight: 20,
+        paddingVertical: 55,
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
     loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
     contentContainer: { alignItems: 'center', paddingBottom: 100, paddingHorizontal: 20 },
     contentWrapper: { width: '100%', maxWidth: 400 },
