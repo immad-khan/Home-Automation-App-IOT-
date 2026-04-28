@@ -1,16 +1,29 @@
-import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient'; 
-import Ionicons from 'react-native-vector-icons/Ionicons'; 
 import { useScale } from '@/hooks/useScale';
+import { LinearGradient } from 'expo-linear-gradient';
+import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import Ionicons from 'react-native-vector-icons/Ionicons';
 
-const DeviceCard = ({ device, gradientStart, gradientEnd, cardBackground, iconName, iconColor, iconBgColor, toggleOnColor, toggleOffColor, onToggle, children }: any) => {
+const DeviceCard = ({ 
+  device, 
+  gradientStart, 
+  gradientEnd, 
+  cardBackground, 
+  iconName, 
+  iconColor, 
+  iconBgColor, 
+  toggleOnColor, 
+  toggleOffColor, 
+  onToggle, 
+  isLoading = false,
+  isDisabled = false,
+  children 
+}: any) => {
   const { sText, sIcon, isLarge } = useScale();
   const isActive = device.value === true || device.value > 0;
 
   return (
     <LinearGradient colors={[gradientStart, gradientEnd]} style={styles.cardGradientWrapper}>
-      <View style={[styles.cardInner, { backgroundColor: cardBackground }]}>
+      <View style={[styles.cardInner, { backgroundColor: cardBackground, opacity: isDisabled ? 0.5 : 1 }]}>
         <View style={styles.mainRow}>
           <View style={styles.cardContent}>
             <View style={[styles.iconContainer, { backgroundColor: iconBgColor, width: sIcon(44), height: sIcon(44), borderRadius: sIcon(22) }]}>
@@ -28,8 +41,13 @@ const DeviceCard = ({ device, gradientStart, gradientEnd, cardBackground, iconNa
           <TouchableOpacity 
             style={[styles.toggleButton, { backgroundColor: isActive ? toggleOnColor : toggleOffColor, width: sIcon(52), height: sIcon(28) }]}
             onPress={onToggle}
+            disabled={isLoading || isDisabled}
           >
-            <View style={[styles.toggleInnerCircle, { transform: [{ translateX: isActive ? sIcon(24) : 0 }], width: sIcon(24), height: sIcon(24) }]} />
+            {isLoading ? (
+              <ActivityIndicator size="small" color="#FFF" />
+            ) : (
+              <View style={[styles.toggleInnerCircle, { transform: [{ translateX: isActive ? sIcon(24) : 0 }], width: sIcon(24), height: sIcon(24) }]} />
+            )}
           </TouchableOpacity>
         </View>
         {children && <View style={styles.extraContent}>{children}</View>}

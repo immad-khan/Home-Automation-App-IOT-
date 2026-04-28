@@ -1,29 +1,31 @@
-import React, { FC, useEffect, useState, useRef } from 'react';
-import {
-    View,
-    Text,
-    StyleSheet,
-    ScrollView,
-    ActivityIndicator,
-    TouchableOpacity,
-    StatusBar,
-    Animated,
-    Platform
-} from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
-import Ionicons from 'react-native-vector-icons/Ionicons';
-import { ref, onValue, update } from 'firebase/database';
-import { database } from '../../services/firebase';
-import PageHeader from '../../components/PageHeader';
-import DeviceCard from '../../components/DeviceCard';
 import { useSettings } from '@/context/settingsContext';
+import useEspConnection from '@/hooks/useEspConnection';
 import { useScale } from '@/hooks/useScale';
+import espCommandService from '@/services/espCommandService';
+import { LinearGradient } from 'expo-linear-gradient';
+import { onValue, ref } from 'firebase/database';
+import { FC, useEffect, useRef, useState } from 'react';
+import {
+    ActivityIndicator,
+    Animated,
+    ScrollView,
+    StatusBar,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View
+} from 'react-native';
+import Ionicons from 'react-native-vector-icons/Ionicons';
+import DeviceCard from '../../components/DeviceCard';
+import PageHeader from '../../components/PageHeader';
+import { database } from '../../services/firebase';
 
 const BLUE_PRIMARY = '#008080';
 
 const Dashboard: FC = () => {
     const [devices, setDevices] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
+    const [loadingDevice, setLoadingDevice] = useState<string | null>(null);
     
     // --- Toast Animation State ---
     const [toastMsg, setToastMsg] = useState('');
@@ -32,6 +34,7 @@ const Dashboard: FC = () => {
     // Hooks
     const { addHistoryItem } = useSettings();
     const { sText, sIcon } = useScale();
+    const espConnection = useEspConnection(true);
 
     useEffect(() => {
         const dbRef = ref(database, 'vista_iot');
@@ -86,48 +89,130 @@ const Dashboard: FC = () => {
     };
 
     const updateSpeed = async (device: any, increment: boolean) => {
-        const fullPath = `vista_iot/${device.path}`;
+        if (!espConnection.isConnected) {
+            triggerToast("Device not connected");
+            return;
+        }
+
         const currentVal = Number(device.value) || 30;
         let newVal = increment ? currentVal + 10 : currentVal - 10;
         if (newVal > 100) newVal = 100;
         if (newVal < 30) newVal = 30; 
         if (newVal === currentVal) return;
 
-        const updates: any = {};
-        updates[fullPath] = newVal;
-        updates[`vista_iot/${device.path}_memory`] = newVal;
-
         try {
-            await update(ref(database), updates);
-            addHistoryItem(`${device.name} speed set to ${newVal}%`, "Manual Control", 'speedometer-outline');
-            triggerToast(`${device.name} speed updated to ${newVal}%`);
+            setLoadingDevice(device.id);
+            
+            // Determine command based on device type
+            let action = "";
+            if (device.id === 'fan1_speed') {
+                action = `FAN1:${newVal}`;
+            } else if (device.id === 'fan2_speed') {
+                action = `FAN2:${newVal}`;
+            }
+
+            if (!action) {
+                triggerToast("Unknown device");
+                return;
+            }
+
+            // Send command to ESP32 (instant execution)
+            const response = await espCommandService.sendCommand(action);
+            
+            if (response.success) {
+                addHistoryItem(`${device.name} speed set to ${newVal}%`, "Manual Control", 'speedometer-outline');
+                triggerToast(`${device.name} speed: ${newVal}%`);
+                
+                // Update local device state from response
+                setDevices(prevDevices => 
+                    prevDevices.map(d => 
+                        d.id === device.id 
+                            ? { ...d, value: newVal, details: `Speed: ${newVal}%` }
+                            : d
+                    )
+                );
+            } else {
+                triggerToast("Command failed: " + response.message);
+            }
         } catch (error) {
-            triggerToast("Error updating speed");
+            triggerToast("Error: " + (error instanceof Error ? error.message : 'Unknown error'));
+            console.error('Speed update error:', error);
+        } finally {
+            setLoadingDevice(null);
         }
     };
 
     const handleToggle = async (device: any) => {
+        if (!espConnection.isConnected) {
+            triggerToast("Device not connected");
+            return;
+        }
+
         try {
-            const fullPath = `vista_iot/${device.path}`;
+            setLoadingDevice(device.id);
+            let action = "";
             let newVal: any;
             let statusLabel = "";
 
             if (device.path === 'servo/angle') {
                 newVal = device.value === 0 ? 90 : 0;
+                action = `SERVO:${newVal}`;
                 statusLabel = newVal === 90 ? "Opened" : "Closed";
             } else if (device.path.includes('relays')) {
                 newVal = !device.value;
                 statusLabel = newVal ? 'Turned ON' : 'Turned OFF';
+                
+                if (device.id === 'bulb1') {
+                    action = newVal ? 'BULB1:ON' : 'BULB1:OFF';
+                } else if (device.id === 'bulb2') {
+                    action = newVal ? 'BULB2:ON' : 'BULB2:OFF';
+                }
             } else if (device.path.includes('fans')) {
                 newVal = device.value === 0 ? (device.memoryValue || 50) : 0;
                 statusLabel = newVal > 0 ? 'Turned ON' : 'Turned OFF';
+                
+                if (device.id === 'fan1_speed') {
+                    action = `FAN1:${newVal}`;
+                } else if (device.id === 'fan2_speed') {
+                    action = `FAN2:${newVal}`;
+                }
             }
 
-            await update(ref(database), { [fullPath]: newVal });
-            addHistoryItem(`${device.name} ${statusLabel}`, "Manual Control", 'flash-outline');
-            triggerToast(`${device.name} successfully ${statusLabel.toLowerCase()}`);
+            if (!action) {
+                triggerToast("Unknown device");
+                return;
+            }
+
+            // Send command to ESP32 (instant execution)
+            const response = await espCommandService.sendCommand(action);
+            
+            if (response.success) {
+                addHistoryItem(`${device.name} ${statusLabel}`, "Manual Control", 'flash-outline');
+                triggerToast(`${device.name} ${statusLabel.toLowerCase()}`);
+                
+                // Update local device state from response
+                setDevices(prevDevices => 
+                    prevDevices.map(d => {
+                        if (d.id === device.id) {
+                            return {
+                                ...d,
+                                value: newVal,
+                                details: d.path === 'servo/angle' 
+                                    ? (newVal > 0 ? `Open (${newVal}°)` : 'Closed')
+                                    : (newVal ? 'Active' : 'Inactive')
+                            };
+                        }
+                        return d;
+                    })
+                );
+            } else {
+                triggerToast("Command failed: " + response.message);
+            }
         } catch (error) {
-            triggerToast("Connection failed");
+            triggerToast("Error: " + (error instanceof Error ? error.message : 'Unknown error'));
+            console.error('Toggle error:', error);
+        } finally {
+            setLoadingDevice(null);
         }
     };
 
@@ -155,22 +240,39 @@ const Dashboard: FC = () => {
                 <View style={styles.contentWrapper}>
                     <LinearGradient colors={['#59bfcaff', '#008080']} style={styles.statsCardWrapper}>
                         <View style={styles.statsCardInner}>
-                            <Text style={[styles.statsTitle, { fontSize: sText(18) }]}>Device Status</Text>
+                            <View style={styles.statsHeader}>
+                                <Text style={[styles.statsTitle, { fontSize: sText(18) }]}>Device Status</Text>
+                                <View style={[styles.connectionIndicator, { backgroundColor: espConnection.isConnected ? '#4CAF50' : '#FF6B35' }]}>
+                                    <Ionicons 
+                                        name={espConnection.isConnected ? "wifi" : "wifi-off"} 
+                                        size={sIcon(14)} 
+                                        color="#fff" 
+                                    />
+                                    <Text style={[styles.connectionText, { fontSize: sText(10) }]}>
+                                        {espConnection.isConnected ? 'Connected' : espConnection.isConnecting ? 'Connecting...' : 'Offline'}
+                                    </Text>
+                                </View>
+                            </View>
+                            {espConnection.isConnecting && (
+                                <ActivityIndicator size="small" color={BLUE_PRIMARY} style={{ marginBottom: 10 }} />
+                            )}
                             <View style={styles.statsRow}>
                                 <View style={styles.statItem}>
                                     <Ionicons name="power" size={sIcon(24)} color={BLUE_PRIMARY} />
                                     <Text style={[styles.statLabel, { fontSize: sText(12) }]}>Active</Text>
-                                    <Text style={[styles.statNumber, { fontSize: sText(20) }]}>{onlineCount}</Text>
+                                    <Text style={[styles.statNumber, { fontSize: sText(20) }]}>{devices.length}</Text>
                                 </View>
                                 <View style={styles.statItem}>
-                                    <Ionicons name="wifi" size={sIcon(24)} color="#4CAF50" />
-                                    <Text style={[styles.statLabel, { fontSize: sText(12) }]}>Online</Text>
-                                    <Text style={[styles.statNumber, { fontSize: sText(20) }]}>{`${onlineCount}/${devices.length}`}</Text>
+                                    <Ionicons name="wifi" size={sIcon(24)} color={espConnection.isConnected ? "#4CAF50" : "#9E9E9E"} />
+                                    <Text style={[styles.statLabel, { fontSize: sText(12) }]}>Status</Text>
+                                    <Text style={[styles.statNumber, { fontSize: sText(16) }]}>
+                                        {espConnection.isConnected ? 'Ready' : 'Wait...'}
+                                    </Text>
                                 </View>
                                 <View style={styles.statItem}>
                                     <Ionicons name="hardware-chip" size={sIcon(24)} color="#FF6B35" />
-                                    <Text style={[styles.statLabel, { fontSize: sText(12) }]}>Total</Text>
-                                    <Text style={[styles.statNumber, { fontSize: sText(20) }]}>{devices.length}</Text>
+                                    <Text style={[styles.statLabel, { fontSize: sText(12) }]}>System</Text>
+                                    <Text style={[styles.statNumber, { fontSize: sText(16) }]}>v2.0</Text>
                                 </View>
                             </View>
                         </View>
@@ -195,6 +297,8 @@ const Dashboard: FC = () => {
                                 toggleOnColor={BLUE_PRIMARY} 
                                 toggleOffColor="#CCCCCC"
                                 onToggle={() => handleToggle(device)}
+                                isLoading={loadingDevice === device.id}
+                                isDisabled={!espConnection.isConnected}
                             >
                                 {device.type === 'fan' && device.value > 0 && (
                                     <View style={styles.speedRow}>
@@ -275,7 +379,17 @@ const styles = StyleSheet.create({
 
     statsCardWrapper: { borderRadius: 20, padding: 1.5, marginVertical: 20, elevation: 4 },
     statsCardInner: { backgroundColor: '#fff', borderRadius: 18.5, padding: 20 },
-    statsTitle: { fontWeight: '700', marginBottom: 15, textAlign: 'center' },
+    statsHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15 },
+    statsTitle: { fontWeight: '700', textAlign: 'left', flex: 1 },
+    connectionIndicator: { 
+        flexDirection: 'row', 
+        alignItems: 'center', 
+        paddingHorizontal: 12, 
+        paddingVertical: 6, 
+        borderRadius: 20,
+        gap: 6
+    },
+    connectionText: { color: '#fff', fontWeight: '600' },
     statsRow: { flexDirection: 'row', justifyContent: 'space-between' },
     statItem: { alignItems: 'center', backgroundColor: '#e6f0fa', borderRadius: 12, flex: 1, marginHorizontal: 4, padding: 12 },
     statLabel: { color: '#666', marginTop: 6 },
